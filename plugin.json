@@ -1,0 +1,8 @@
+{
+  "name":        "ozel_chat",
+  "label":       "Özel Chat",
+  "version":     "2.0.0",
+  "description": "Peer ID ile doğrudan özel mesajlaşma — libp2p stream",
+  "author":      "AND",
+  "requires":    []
+}
