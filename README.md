@@ -1,100 +1,109 @@
-# and-plugin-ozel-chat — Özel Mesajlaşma
+# and-plugin-konu-ac — Konu Açma Eklentisi
 
-Başka bir AND kullanıcısıyla doğrudan ve özel mesajlaş.
+Yeni forum konusu oluştur, taslak kaydet, kategoriler arasında gezin.
 
 ---
 
 ## Genel Bakış
 
-`and-plugin-ozel-chat` binary'si, libp2p stream protokolü (`/and/dm/1.0.0`) üzerinden iki peer arasında doğrudan mesajlaşma sağlar.
+`and-plugin-konu-ac` forum yazma işlemlerini yönetir. Ana forum görünümü salt okunurdur; tüm konu oluşturma bu eklenti üzerinden gerçekleşir.
 
-Mesajlar GossipSub üzerinden yayılmaz; yalnızca hedef peer'a iletilir.  
-AND, `/and/dm/1.0.0` akışını dinler ve gelen mesajları eklentiye long-poll HTTP üzerinden iletir.
+Bu eklenti menüde **görünmez** (`Label` alanı boştur). Forumdan `n` tuşuna basıldığında AND tarafından **doğrudan ana süreç içinde** açılır — ayrı bir binary başlatılmaz, geçiş anında gerçekleşir.
 
 ---
 
 ## Kurulum
 
 ```bash
-go build -o and-plugin-ozel-chat ./Eklentiler/ozel_chat
+go build -o and-plugin-konu-ac ./Eklentiler/konu_ac
 
 # Windows
-go build -o and-plugin-ozel-chat.exe ./Eklentiler/ozel_chat
+go build -o and-plugin-konu-ac.exe ./Eklentiler/konu_ac
 ```
+
+Binary AND dizininde bulunmalıdır; AND başlangıçta manifest JSON dosyasını okur.
+
+---
+
+## Nasıl Açılır
+
+Forumu açtıktan sonra `n` tuşuna bas.  
+AND seçili kategoriyi otomatik iletir; kategori seçim ekranı atlanır.
 
 ---
 
 ## Kullanım
 
-Ana menüden **Özel Chat**'i seç.
+### Konu formu
 
-### Adımlar
-
-1. **Peer ID girişi** — hedef kişinin libp2p Peer ID'sini gir (ör. `12D3KooWAbc…`)
-2. `enter` ile mesajlaşma ekranına geç
-3. Mesajını yaz, `enter` ile gönder
-
-Karşı tarafın Peer ID'si AND ana menüsünde kimlik bilgisi ekranında görünür.
-
-### Peer ID girişi ekranı
+Kategori satırında `◀` / `▶` tuşları ile kategori değiştirilebilir.
 
 | Tuş | İşlev |
 |-----|-------|
-| Yazma | Peer ID'yi gir |
-| `enter` | Bağlantıyı onayla, mesajlaşma ekranına geç |
-| `esc` ya da `q` | Ana menüye dön |
+| `tab` | Başlık ↔ İçerik arasında geç |
+| `enter` (Başlık) | İçerik alanına geç |
+| `enter` (İçerik) | Alt satıra geç |
+| `ctrl+s` | Konuyu gönder |
+| `ctrl+p` | Kalıcılık talebini aç/kapat (★ gösterilir) |
+| `ctrl+t` | Taslak listesini aç (taslak varsa) |
+| `◀` / `▶` | Kategori değiştir |
+| `esc` | İçeriği taslak olarak kaydet ve foruma dön |
+| `ctrl+c` | Kaydetmeden çık |
 
-### Mesajlaşma ekranı
+### Taslak listesi
 
 | Tuş | İşlev |
 |-----|-------|
-| Yazma | Mesajı yaz |
-| `enter` | Mesajı gönder |
-| `esc` | Peer ID girişine dön |
-| `ctrl+c` | Çık |
+| `↑` / `↓` ya da `j` / `k` | Taslak seç |
+| `enter` | Seçili taslağı forma yükle |
+| `d` | Seçili taslağı sil |
+| `esc` | Forma dön |
 
 ---
 
-## Teknik Detaylar
+## Taslak sistemi
 
-### Protokol
+`esc` tuşuna basıldığında başlık veya içerik doluysa taslak otomatik kaydedilir.  
+Aynı kategori tekrar açıldığında taslaklar `ctrl+t` ile geri yüklenebilir.
 
-Mesajlar `/and/dm/1.0.0` protokolüyle libp2p stream üzerinden iletilir.  
-Her mesaj tek JSON paketi olarak gönderilir:
-
-```json
-{
-  "from": "kullanici_adi",
-  "text": "mesaj metni",
-  "at":   "2026-01-01T12:00:00Z"
-}
-```
-
-### Gelen mesajlar — long poll
-
-Eklenti, gelen mesajları doğrudan dinlemez. Bunun yerine AND'ın DM broker'ı (`dmmgr`) `/and/dm/1.0.0` akışını kaydeder ve gelen mesajları yakalar.
-
-Eklenti her 5 saniyede `GET /api/v1/dm/poll` isteği gönderir.  
-AND mesaj gelene kadar bekler; gelince JSON array döner, yoksa 5 saniye sonra boş array döner.
-
-### Güvenlik sınırları
-
-- Gelen mesajlar 16 KB ile sınırlıdır; daha büyük paketler atılır
-- Her akış için 30 saniyelik okuma zaman aşımı uygulanır
-- Gönderme işlemi için 30 saniyelik zaman aşımı uygulanır
-
-### Veri saklama
-
-Mesaj geçmişi yalnızca oturum boyunca bellekte tutulur.  
-AND kapatıldığında veya eklenti çıktığında mesajlar silinir; kalıcı mesajlaşma yoktur.
+Taslaklar `AND_DATA_DIR/taslaklar_<kategori>.json` dosyalarında saklanır.  
+Bu dosyalar yereldir, ağa gönderilmez ve `.gitignore`'da yer alır.
 
 ---
 
-## Sınırlamalar
+## Karakter Sınırları
 
-- **Uçtan uca şifreleme yoktur.** Mesajlar libp2p Noise protokolü ile aktarım katmanında şifrelenir, ancak uygulama düzeyinde ek şifreleme uygulanmaz.
-- **Kalıcı iletim yoktur.** Alıcı çevrimdışıysa mesaj iletilmez ve kaybolur.
-- **Görünen ad doğrulanmaz.** `From` alanı gönderenin beyanıdır; gerçek kimlik için Peer ID'yi kullan.
+| Alan | Maksimum |
+|------|---------|
+| Başlık | 100 karakter |
+| İçerik | 2000 karakter |
+
+---
+
+## Kategoriler
+
+| | | | |
+|--|--|--|--|
+| Python | C / C++ | Rust | Go |
+| JavaScript | Java / Kotlin | Yazılım | Web |
+| Mobil | Yapay Zeka | Veritabanı | DevOps |
+| Linux | Bilişim | Siber Güvenlik | Donanım |
+| Oyun Geliştirme | Açık Kaynak | Kariyer | Genel |
+
+---
+
+## Kalıcılık talebi
+
+`ctrl+p` ile aktif edilen kalıcılık talebi, moderatörden TTL muafiyeti isteğidir.  
+Form başlığında `★ Kalıcılık talep ediliyor` gösterilir.
+
+Bu yalnızca bir istek olarak iletilir; karar her zaman moderatördedir.
+
+---
+
+## Moderasyon notu
+
+Gönderilen konu hemen ağda yayılır, ancak varsayılan olarak moderasyon kuyruğuna girer ve 5 günlük TTL'e tabidir. Kurucu veya sertifikalı bir moderatör onaylayana kadar konu geçici olarak işaretlenir.
 
 ---
 
@@ -102,19 +111,21 @@ AND kapatıldığında veya eklenti çıktığında mesajlar silinir; kalıcı m
 
 ```json
 {
-  "name":        "ozel_chat",
-  "label":       "Özel Chat",
-  "version":     "2.0.0",
-  "description": "Peer ID ile doğrudan özel mesajlaşma — libp2p stream (/and/dm/1.0.0)",
+  "name":        "konu_ac",
+  "label":       "",
+  "version":     "2.1.0",
+  "description": "Forum'da yeni konu oluşturma ve taslak yönetimi (menüde gizli, forumdan n ile açılır)",
   "author":      "AND"
 }
 ```
+
+`label` boş olduğu için bu eklenti ana menüde görünmez.
 
 ---
 
 ## Kaynak
 
-Kaynak kod: [Eklentiler/ozel_chat/main.go](main.go)
+Kaynak kod: [Eklentiler/konu_ac/main.go](main.go)
 
 ---
 
@@ -122,5 +133,6 @@ Kaynak kod: [Eklentiler/ozel_chat/main.go](main.go)
 
 | Sürüm | Değişiklik |
 |-------|------------|
-| 2.0.0 | Bağımsız binary; long-poll HTTP IPC; dmmgr üzerinden akış proxy'si |
-| 1.0.0 | İlk sürüm (gömülü plugin sistemi) |
+| 2.1.0 | AND ana sürecinde inline çalışma (ayrı binary başlatılmaz); Tab ile alan geçişi; kategori ◀/▶; Enter ile İçerik'te alt satır |
+| 2.0.0 | Bağımsız binary; HTTP IPC ile AND ile iletişim; taslak sistemi |
+| 1.0.0 | İlk sürüm |
