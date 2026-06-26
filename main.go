@@ -4,64 +4,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/lucian95511/and/internal/forum"
 	"github.com/lucian95511/and/internal/pluginapi"
 )
 
 var manifest = pluginapi.Manifest{
-	Name:        "konu_ac",
-	Label:       "",
+	Name:        "ozel_chat",
+	Label:       "Özel Chat",
 	Version:     "2.1.0",
-	Description: "Forum'da yeni konu oluşturma ve taslak yönetimi",
+	Description: "Peer ID ile doğrudan özel mesajlaşma ve dosya aktarımı — libp2p stream",
 	Author:      "AND",
 }
-
-const (
-	maxBaslik = 100
-	maxIcerik = 2000
-)
-
-// ─── Draft I/O ───────────────────────────────────────────────────────────────
-
-type taslak struct {
-	Kategori    string `json:"kategori"`
-	Baslik      string `json:"baslik"`
-	Icerik      string `json:"icerik"`
-	KaliciTalep bool   `json:"kalici_talep,omitempty"`
-}
-
-type taslakDosya struct {
-	Taslaklar []taslak `json:"taslaklar"`
-}
-
-func taslakYolu(dataDir, kategori string) string {
-	return filepath.Join(dataDir, "taslaklar_"+kategori+".json")
-}
-
-func taslakOku(dataDir, kategori string) []taslak {
-	data, err := os.ReadFile(taslakYolu(dataDir, kategori))
-	if err != nil {
-		return nil
-	}
-	var df taslakDosya
-	_ = json.Unmarshal(data, &df)
-	return df.Taslaklar
-}
-
-func taslakYaz(dataDir, kategori string, ts []taslak) {
-	data, _ := json.Marshal(taslakDosya{Taslaklar: ts})
-	_ = os.WriteFile(taslakYolu(dataDir, kategori), data, 0o600)
-}
-
-// ─── Main ────────────────────────────────────────────────────────────────────
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--manifest" {
@@ -72,538 +32,477 @@ func main() {
 
 	client, err := pluginapi.NewClientFromEnv()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "konu_ac:", err)
+		fmt.Fprintln(os.Stderr, "ozel_chat:", err)
 		os.Exit(1)
 	}
 
-	dataDir := pluginapi.DataDir()
-	preCategory := pluginapi.Category()
+	id, err := client.Identity()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ozel_chat: kimlik sorgulanamadı:", err)
+		os.Exit(1)
+	}
 
-	m := newModel(client, dataDir, preCategory)
+	m := newModel(client, id)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "konu_ac:", err)
+		fmt.Fprintln(os.Stderr, "ozel_chat:", err)
 		os.Exit(1)
 	}
 }
 
-// ─── Messages ────────────────────────────────────────────────────────────────
+var (
+	stTitle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	stSelf     = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	stOther    = lipgloss.NewStyle()
+	stOk       = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	stErr      = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	stDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	stFile     = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	stBorder   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+)
 
-type gonderildiMsg struct {
-	baslik string
-	err    error
+type dmPollResult struct {
+	msgs []pluginapi.DMMsg
+	err  error
 }
+type filePollResult struct {
+	msgs []pluginapi.FileMsg
+	err  error
+}
+type consentPollResult struct {
+	reqs []pluginapi.FileConsentReq
+	err  error
+}
+type sendResult struct{ err error }
+type fileSendResult struct{ err error }
 
-// ─── Screens ─────────────────────────────────────────────────────────────────
-
-type screen int
+type ekran int
 
 const (
-	screenForm   screen = iota // başlık + içerik formu
-	screenTaslak               // taslak listesi
+	ekPeerGirisi ekran = iota
+	ekSohbet
+	ekDosyaGonder
+	ekOnay
 )
-
-// odak alanları (form ekranı)
-const (
-	odakBaslik = 0
-	odakIcerik = 1
-)
-
-// ─── Model ───────────────────────────────────────────────────────────────────
 
 type model struct {
-	client  *pluginapi.Client
-	dataDir string
-	scr     screen
-	w, h    int
-
-	// Kategori — inline ←/→ ile değiştirilir
-	katIdx int
-
-	// Form
-	baslik      textinput.Model
-	icerik      textarea.Model
-	odak        int
-	kalici      bool
-	gonderiyor  bool
-	editMode    bool
-	editIdx     int
-
-	// Taslak listesi
-	taslaklar []taslak
-	taslakIdx int
-
-	notice string
-	isOK   bool
+	client      *pluginapi.Client
+	identity    pluginapi.IdentityInfo
+	ekran       ekran
+	peerInput   textinput.Model
+	msgInput    textinput.Model
+	fileInput   textinput.Model
+	peerID      string
+	vp          viewport.Model
+	lines       []string
+	notice      string
+	isErr       bool
+	sending     bool
+	w, h        int
+	pendingConsent *pluginapi.FileConsentReq // bekleyen onay isteği
 }
 
-func newModel(client *pluginapi.Client, dataDir, preCategory string) model {
-	bg := textinput.New()
-	bg.Placeholder = "konu başlığı…"
-	bg.CharLimit = maxBaslik
-	bg.Focus()
+func newModel(c *pluginapi.Client, id pluginapi.IdentityInfo) model {
+	pid := textinput.New()
+	pid.Placeholder = "hedef peer ID (12D3Koo…)"
+	pid.CharLimit = 128
+	pid.Focus()
 
-	ia := textarea.New()
-	ia.Placeholder = "konu içeriği…"
-	ia.SetHeight(10)
-	ia.CharLimit = maxIcerik
-	ia.ShowLineNumbers = false
-	ia.Blur()
+	msg := textinput.New()
+	msg.Placeholder = "mesaj…"
+	msg.CharLimit = 500
 
-	katIdx := 0
-	if preCategory != "" {
-		for i, k := range forum.Categories {
-			if strings.EqualFold(k, preCategory) {
-				katIdx = i
-				break
-			}
-		}
+	fi := textinput.New()
+	fi.Placeholder = "dosya yolu (örn: C:\\belgeler\\rapor.pdf)"
+	fi.CharLimit = 512
+
+	return model{
+		client:    c,
+		identity:  id,
+		ekran:     ekPeerGirisi,
+		peerInput: pid,
+		msgInput:  msg,
+		fileInput: fi,
 	}
-
-	m := model{
-		client:  client,
-		dataDir: dataDir,
-		scr:     screenForm,
-		katIdx:  katIdx,
-		baslik:  bg,
-		icerik:  ia,
-		odak:    odakBaslik,
-	}
-	return m
 }
 
 func (m model) Init() tea.Cmd {
-	return textinput.Blink
+	return tea.Batch(textinput.Blink, consentPollCmd(m.client))
 }
 
-// ─── Update ──────────────────────────────────────────────────────────────────
+func pollCmd(c *pluginapi.Client) tea.Cmd {
+	return func() tea.Msg {
+		msgs, err := c.PollDM()
+		return dmPollResult{msgs: msgs, err: err}
+	}
+}
+
+func pollCmdAfter(c *pluginapi.Client) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(2 * time.Second)
+		msgs, err := c.PollDM()
+		return dmPollResult{msgs: msgs, err: err}
+	}
+}
+
+func filePollCmd(c *pluginapi.Client) tea.Cmd {
+	return func() tea.Msg {
+		msgs, err := c.PollFile()
+		return filePollResult{msgs: msgs, err: err}
+	}
+}
+
+func filePollCmdAfter(c *pluginapi.Client) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(2 * time.Second)
+		msgs, err := c.PollFile()
+		return filePollResult{msgs: msgs, err: err}
+	}
+}
+
+func consentPollCmd(c *pluginapi.Client) tea.Cmd {
+	return func() tea.Msg {
+		reqs, err := c.PollConsent()
+		return consentPollResult{reqs: reqs, err: err}
+	}
+}
+
+func sendCmd(c *pluginapi.Client, peerID, msg string) tea.Cmd {
+	return func() tea.Msg {
+		return sendResult{err: c.SendDM(peerID, msg)}
+	}
+}
+
+func fileSendCmd(c *pluginapi.Client, peerID, path string) tea.Cmd {
+	return func() tea.Msg {
+		return fileSendResult{err: c.SendFile(peerID, path)}
+	}
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
-		vw := msg.Width - 10
-		if vw < 20 {
-			vw = 60
-		}
-		m.icerik.SetWidth(vw)
-		ih := msg.Height - 18
-		if ih < 4 {
-			ih = 4
-		}
-		m.icerik.SetHeight(ih)
+		m.vp.Width = msg.Width - 4
+		m.vp.Height = msg.Height - 10
+		m.msgInput.Width = msg.Width - 4
+		m.fileInput.Width = msg.Width - 4
+		m.syncVP()
 		return m, nil
 
-	case gonderildiMsg:
-		m.gonderiyor = false
+	case dmPollResult:
 		if msg.err != nil {
-			m.notice = "Hata: " + msg.err.Error()
-			m.isOK = false
-			m.odak = odakBaslik
-			m.icerik.Blur()
-			return m, m.baslik.Focus()
+			return m, pollCmdAfter(m.client)
 		}
-		return m, tea.Quit
+		for _, dm := range msg.msgs {
+			ts := dm.ReceivedAt.Local().Format("15:04")
+			line := stOther.Render(fmt.Sprintf("[%s] %s: %s", ts, dm.From, dm.Text))
+			m.lines = append(m.lines, line)
+		}
+		if len(msg.msgs) > 0 {
+			m.syncVP()
+		}
+		return m, pollCmd(m.client)
+
+	case consentPollResult:
+		if msg.err == nil && len(msg.reqs) > 0 {
+			req := msg.reqs[0]
+			m.pendingConsent = &req
+			m.ekran = ekOnay
+			return m, nil
+		}
+		return m, consentPollCmd(m.client)
+
+	case filePollResult:
+		if msg.err != nil {
+			return m, filePollCmdAfter(m.client)
+		}
+		for _, fm := range msg.msgs {
+			ts := fm.ReceivedAt.Local().Format("15:04")
+			label := fmt.Sprintf("[%s] dosya %s → %s (%s) kaydedildi: %s", ts, fm.From, fm.Filename, formatSize(fm.Size), fm.SavePath)
+			m.lines = append(m.lines, stFile.Render(label))
+		}
+		if len(msg.msgs) > 0 {
+			m.syncVP()
+		}
+		return m, filePollCmd(m.client)
+
+	case sendResult:
+		if msg.err != nil {
+			m.notice = "Gönderme hatası: " + msg.err.Error()
+			m.isErr = true
+		} else {
+			m.notice = ""
+			m.isErr = false
+		}
+		return m, nil
+
+	case fileSendResult:
+		m.sending = false
+		if msg.err != nil {
+			m.notice = "Dosya hatası: " + msg.err.Error()
+			m.isErr = true
+			return m, nil
+		}
+		m.notice = "Dosya gönderildi."
+		m.isErr = false
+		m.ekran = ekSohbet
+		m.msgInput.Focus()
+		m.fileInput.Blur()
+		m.fileInput.SetValue("")
+		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
 
-	// iletilmemiş mesajları aktif alana ilet
-	if m.scr == screenForm {
+	switch m.ekran {
+	case ekPeerGirisi:
 		var cmd tea.Cmd
-		if m.odak == odakBaslik {
-			m.baslik, cmd = m.baslik.Update(msg)
-		} else {
-			m.icerik, cmd = m.icerik.Update(msg)
-		}
+		m.peerInput, cmd = m.peerInput.Update(msg)
+		return m, cmd
+	case ekSohbet:
+		var cmd tea.Cmd
+		m.msgInput, cmd = m.msgInput.Update(msg)
+		return m, cmd
+	case ekDosyaGonder:
+		var cmd tea.Cmd
+		m.fileInput, cmd = m.fileInput.Update(msg)
 		return m, cmd
 	}
 	return m, nil
 }
 
-func (m model) handleKey(msg tea.KeyMsg) (model, tea.Cmd) {
-	if m.scr == screenTaslak {
-		return m.keyTaslak(msg)
-	}
-	return m.keyForm(msg)
-}
-
-// ── Form tuşları ─────────────────────────────────────────────────────────────
-
-func (m model) keyForm(msg tea.KeyMsg) (model, tea.Cmd) {
-	// gonderiyor iken hiçbir şey yapma
-	if m.gonderiyor {
-		return m, nil
-	}
-
-	switch msg.String() {
-	case "ctrl+c":
-		return m, tea.Quit
-
-	case "esc":
-		// Taslak olarak kaydet (boş değilse) ve çık
-		baslik := strings.TrimSpace(m.baslik.Value())
-		icerik := strings.TrimSpace(m.icerik.Value())
-		if baslik != "" || icerik != "" {
-			kat := forum.Categories[m.katIdx]
-			ts := taslakOku(m.dataDir, kat)
-			t := taslak{Kategori: kat, Baslik: baslik, Icerik: icerik, KaliciTalep: m.kalici}
-			if m.editMode {
-				ts[m.editIdx] = t
-			} else {
-				ts = append(ts, t)
+func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.ekran {
+	case ekPeerGirisi:
+		switch msg.String() {
+		case "ctrl+c", "q", "esc":
+			return m, tea.Quit
+		case "enter":
+			pid := strings.TrimSpace(m.peerInput.Value())
+			if pid == "" {
+				m.notice = "Peer ID boş olamaz."
+				m.isErr = true
+				return m, nil
 			}
-			taslakYaz(m.dataDir, kat, ts)
-		}
-		return m, tea.Quit
-
-	// Kategori değiştir ←/→
-	case "left":
-		if m.odak == odakBaslik && m.katIdx > 0 {
-			m.katIdx--
-			m.notice = ""
-		}
-	case "right":
-		if m.odak == odakBaslik && m.katIdx < len(forum.Categories)-1 {
-			m.katIdx++
-			m.notice = ""
+			m.peerID = pid
+			m.ekran = ekSohbet
+			m.msgInput.Focus()
+			m.peerInput.Blur()
+			return m, tea.Batch(textinput.Blink, pollCmd(m.client), filePollCmd(m.client))
+		default:
+			var cmd tea.Cmd
+			m.peerInput, cmd = m.peerInput.Update(msg)
+			return m, cmd
 		}
 
-	// Tab: alanlar arası geçiş
-	case "tab":
-		if m.odak == odakBaslik {
-			m.odak = odakIcerik
-			m.baslik.Blur()
-			return m, m.icerik.Focus()
-		}
-		m.odak = odakBaslik
-		m.icerik.Blur()
-		return m, m.baslik.Focus()
-
-	// Enter: başlıktayken içeriğe geç, içerikteyken alt satır
-	case "enter":
-		if m.odak == odakBaslik {
-			m.odak = odakIcerik
-			m.baslik.Blur()
-			return m, m.icerik.Focus()
-		}
-		// odakIcerik → textarea'ya ilet (alt satır)
-		var cmd tea.Cmd
-		m.icerik, cmd = m.icerik.Update(msg)
-		return m, cmd
-
-	// Kalıcı konu talebi
-	case "ctrl+p":
-		m.kalici = !m.kalici
-
-	// Taslak listesi
-	case "ctrl+t":
-		kat := forum.Categories[m.katIdx]
-		ts := taslakOku(m.dataDir, kat)
-		if len(ts) > 0 {
-			m.taslaklar = ts
-			m.taslakIdx = 0
-			m.baslik.Blur()
-			m.icerik.Blur()
-			m.scr = screenTaslak
+	case ekSohbet:
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.ekran = ekPeerGirisi
+			m.peerInput.Focus()
+			m.msgInput.Blur()
 			return m, nil
-		}
-		m.notice = "Bu kategoride taslak yok"
-		m.isOK = false
-
-	// Taslak kaydet
-	case "ctrl+d":
-		baslik := strings.TrimSpace(m.baslik.Value())
-		icerik := strings.TrimSpace(m.icerik.Value())
-		if baslik == "" && icerik == "" {
-			m.notice = "Başlık veya içerik boş olamaz"
-			m.isOK = false
+		case "ctrl+f":
+			m.ekran = ekDosyaGonder
+			m.fileInput.Focus()
+			m.msgInput.Blur()
+			m.notice = ""
 			return m, nil
+		case "enter":
+			text := strings.TrimSpace(m.msgInput.Value())
+			if text == "" {
+				return m, nil
+			}
+			m.msgInput.SetValue("")
+			ts := "şimdi"
+			line := stSelf.Render(fmt.Sprintf("[%s] %s: %s", ts, m.identity.Name, text))
+			m.lines = append(m.lines, line)
+			m.syncVP()
+			return m, sendCmd(m.client, m.peerID, text)
+		default:
+			var cmd tea.Cmd
+			m.msgInput, cmd = m.msgInput.Update(msg)
+			return m, cmd
 		}
-		kat := forum.Categories[m.katIdx]
-		ts := taslakOku(m.dataDir, kat)
-		t := taslak{Kategori: kat, Baslik: baslik, Icerik: icerik, KaliciTalep: m.kalici}
-		if m.editMode {
-			ts[m.editIdx] = t
-		} else {
-			ts = append(ts, t)
+
+	case ekOnay:
+		if m.pendingConsent == nil {
+			m.ekran = ekSohbet
+			return m, consentPollCmd(m.client)
 		}
-		taslakYaz(m.dataDir, kat, ts)
-		m.notice = "Taslak kaydedildi ✔"
-		m.isOK = true
+		switch msg.String() {
+		case "y", "Y":
+			tid := m.pendingConsent.TransferID
+			m.pendingConsent = nil
+			m.ekran = ekSohbet
+			m.notice = "Dosya transferi kabul edildi."
+			m.isErr = false
+			c := m.client
+			return m, tea.Batch(
+				func() tea.Msg { return sendResult{err: c.RespondConsent(tid, true)} },
+				consentPollCmd(m.client),
+			)
+		case "n", "N", "esc", "ctrl+c":
+			tid := m.pendingConsent.TransferID
+			m.pendingConsent = nil
+			m.ekran = ekSohbet
+			m.notice = "Dosya transferi reddedildi."
+			m.isErr = false
+			c := m.client
+			return m, tea.Batch(
+				func() tea.Msg { return sendResult{err: c.RespondConsent(tid, false)} },
+				consentPollCmd(m.client),
+			)
+		}
 		return m, nil
 
-	// Gönder
-	case "ctrl+s":
-		baslik := strings.TrimSpace(m.baslik.Value())
-		icerik := strings.TrimSpace(m.icerik.Value())
-		if baslik == "" {
-			m.notice = "Başlık boş olamaz"
-			m.isOK = false
-			m.odak = odakBaslik
-			m.icerik.Blur()
-			return m, m.baslik.Focus()
-		}
-		if icerik == "" {
-			m.notice = "İçerik boş olamaz"
-			m.isOK = false
-			m.odak = odakIcerik
-			m.baslik.Blur()
-			return m, m.icerik.Focus()
-		}
-		m.baslik.Blur()
-		m.icerik.Blur()
-		m.gonderiyor = true
-		m.notice = ""
-		client := m.client
-		isDuzenle, duzenIdx := m.editMode, m.editIdx
-		kat := forum.Categories[m.katIdx]
-		kalici := m.kalici
-		dataDir := m.dataDir
-		return m, func() tea.Msg {
-			if err := client.CreatePost(kat, baslik, icerik, kalici); err != nil {
-				return gonderildiMsg{baslik: baslik, err: err}
+	case ekDosyaGonder:
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			if m.sending {
+				return m, nil // transferi iptal edemeyiz; tamamlanmasını bekle
 			}
-			if isDuzenle {
-				ts := taslakOku(dataDir, kat)
-				if duzenIdx < len(ts) {
-					taslakYaz(dataDir, kat, append(ts[:duzenIdx], ts[duzenIdx+1:]...))
-				}
+			m.ekran = ekSohbet
+			m.msgInput.Focus()
+			m.fileInput.Blur()
+			m.notice = ""
+			return m, nil
+		case "enter":
+			if m.sending {
+				return m, nil
 			}
-			return gonderildiMsg{baslik: baslik}
-		}
-
-	default:
-		// aktif alana ilet
-		var cmd tea.Cmd
-		if m.odak == odakBaslik {
-			m.baslik, cmd = m.baslik.Update(msg)
-		} else {
-			m.icerik, cmd = m.icerik.Update(msg)
-		}
-		return m, cmd
-	}
-	return m, nil
-}
-
-// ── Taslak tuşları ────────────────────────────────────────────────────────────
-
-func (m model) keyTaslak(msg tea.KeyMsg) (model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c", "q":
-		return m, tea.Quit
-	case "esc":
-		m.scr = screenForm
-		m.odak = odakBaslik
-		return m, m.baslik.Focus()
-	case "up", "k":
-		if m.taslakIdx > 0 {
-			m.taslakIdx--
-		}
-	case "down", "j":
-		if m.taslakIdx < len(m.taslaklar)-1 {
-			m.taslakIdx++
-		}
-	case "enter", "e":
-		if m.taslakIdx < len(m.taslaklar) {
-			t := m.taslaklar[m.taslakIdx]
-			m.editMode = true
-			m.editIdx = m.taslakIdx
-			// kategori indeksini ayarla
-			for i, k := range forum.Categories {
-				if k == t.Kategori {
-					m.katIdx = i
-					break
-				}
+			path := strings.TrimSpace(m.fileInput.Value())
+			if path == "" {
+				m.notice = "Dosya yolu boş olamaz."
+				m.isErr = true
+				return m, nil
 			}
-			m.baslik.SetValue(t.Baslik)
-			m.icerik.SetValue(t.Icerik)
-			m.kalici = t.KaliciTalep
-			m.odak = odakBaslik
-			m.icerik.Blur()
-			m.scr = screenForm
-			return m, m.baslik.Focus()
-		}
-	case "p":
-		if m.taslakIdx < len(m.taslaklar) {
-			t := m.taslaklar[m.taslakIdx]
-			idx := m.taslakIdx
-			kat := t.Kategori
-			client := m.client
-			dataDir := m.dataDir
-			m.gonderiyor = true
-			m.scr = screenForm
-			return m, func() tea.Msg {
-				if err := client.CreatePost(kat, t.Baslik, t.Icerik, t.KaliciTalep); err != nil {
-					return gonderildiMsg{baslik: t.Baslik, err: err}
-				}
-				ts := taslakOku(dataDir, kat)
-				if idx < len(ts) {
-					taslakYaz(dataDir, kat, append(ts[:idx], ts[idx+1:]...))
-				}
-				return gonderildiMsg{baslik: t.Baslik}
-			}
-		}
-	case "x":
-		if m.taslakIdx < len(m.taslaklar) {
-			m.taslaklar = append(m.taslaklar[:m.taslakIdx], m.taslaklar[m.taslakIdx+1:]...)
-			taslakYaz(m.dataDir, forum.Categories[m.katIdx], m.taslaklar)
-			if m.taslakIdx >= len(m.taslaklar) && m.taslakIdx > 0 {
-				m.taslakIdx--
-			}
-			if len(m.taslaklar) == 0 {
-				m.scr = screenForm
-				m.odak = odakBaslik
-				return m, m.baslik.Focus()
-			}
+			m.sending = true
+			m.notice = "Dosya gönderiliyor…"
+			m.isErr = false
+			return m, fileSendCmd(m.client, m.peerID, path)
+		default:
+			var cmd tea.Cmd
+			m.fileInput, cmd = m.fileInput.Update(msg)
+			return m, cmd
 		}
 	}
 	return m, nil
 }
 
-// ─── View ────────────────────────────────────────────────────────────────────
+func (m *model) syncVP() {
+	m.vp.SetContent(strings.Join(m.lines, "\n"))
+	m.vp.GotoBottom()
+}
+
 
 func (m model) View() string {
-	if m.scr == screenTaslak {
-		return m.viewTaslak()
+	switch m.ekran {
+	case ekPeerGirisi:
+		return m.viewPeerGirisi()
+	case ekSohbet:
+		return m.viewSohbet()
+	case ekDosyaGonder:
+		return m.viewDosyaGonder()
+	case ekOnay:
+		return m.viewOnay()
 	}
-	return m.viewForm()
+	return ""
 }
 
-func (m model) viewForm() string {
-	var b strings.Builder
-
-	// ── Başlık + kategori satırı ──
-	kat := forum.Categories[m.katIdx]
-	sol := " "
-	sag := " "
-	if m.odak == odakBaslik {
-		if m.katIdx > 0 {
-			sol = "◀"
-		}
-		if m.katIdx < len(forum.Categories)-1 {
-			sag = "▶"
-		}
+func (m model) viewOnay() string {
+	if m.pendingConsent == nil {
+		return ""
 	}
-	katStr := stMuted.Render(sol) + " " + stKat.Render(kat) + " " + stMuted.Render(sag)
-	b.WriteString(stHeader.Render("Yeni Konu") + "  " + katStr + "\n\n")
-
-	// ── Başlık alanı ──
-	blbl := stLabel
-	if m.odak == odakBaslik {
-		blbl = stLabelAktif
+	c := m.pendingConsent
+	senderShort := c.SenderID
+	if r := []rune(senderShort); len(r) > 20 {
+		senderShort = string(r[:8]) + "…" + string(r[len(r)-8:])
 	}
-	b.WriteString(blbl.Render(fmt.Sprintf("Başlık  %d/%d", len([]rune(m.baslik.Value())), maxBaslik)) + "\n")
-	b.WriteString(m.baslik.View() + "\n\n")
 
-	// ── İçerik alanı ──
-	ilbl := stLabel
-	if m.odak == odakIcerik {
-		ilbl = stLabelAktif
+	stWarn := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220"))
+	stBox2 := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("220")).Padding(1, 3)
+
+	var sb strings.Builder
+	sb.WriteString(stWarn.Render("Dosya Transfer İsteği") + "\n\n")
+	sb.WriteString(fmt.Sprintf("Gönderen : %s\n", stDim.Render(senderShort)))
+	sb.WriteString(fmt.Sprintf("Dosya    : %s\n", stFile.Render(c.Filename)))
+	sb.WriteString(fmt.Sprintf("Boyut    : %s\n\n", stDim.Render(formatSize(c.Size))))
+	sb.WriteString("Bu kullanıcının dosya göndermesine izin veriyor musun?\n\n")
+	sb.WriteString(stOk.Render("[y] Kabul") + "   " + stErr.Render("[n] Reddet"))
+
+	box := stBox2.Render(sb.String())
+	if m.w > 0 && m.h > 0 {
+		return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, box)
 	}
-	icerikLen := len([]rune(m.icerik.Value()))
-	b.WriteString(ilbl.Render("İçerik  ") + charBar(icerikLen, maxIcerik) + "\n")
-	b.WriteString(m.icerik.View() + "\n\n")
+	return box
+}
 
-	// ── Kalıcı toggle ──
-	kaliciIkon := "[ ]"
-	if m.kalici {
-		kaliciIkon = "[✔]"
+func (m model) viewPeerGirisi() string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s\n\n", stTitle.Render("AND — Özel Chat"))
+	fmt.Fprintf(&sb, "Bağlanılacak peer ID'yi gir:\n\n")
+	fmt.Fprintf(&sb, "%s\n\n", stBorder.Render(m.peerInput.View()))
+	fmt.Fprintf(&sb, "%s\n\n", stDim.Render("Kendi peer ID'in: "+m.identity.PeerID))
+	if m.isErr {
+		fmt.Fprintf(&sb, "%s\n", stErr.Render(m.notice))
 	}
-	b.WriteString(stMuted.Render(kaliciIkon+" Kalıcı konu talebi  (ctrl+p)") + "\n\n")
+	fmt.Fprintf(&sb, "%s", stDim.Render("enter bağlan   esc/q çıkış"))
+	return sb.String()
+}
 
-	// ── Durum / hata ──
-	if m.gonderiyor {
-		b.WriteString(stWait.Render(" Gönderiliyor… ") + "\n\n")
+func (m model) viewSohbet() string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s\n\n", stTitle.Render(fmt.Sprintf("AND — Özel Chat  [→ %s…]", shortPeerID(m.peerID))))
+	fmt.Fprintf(&sb, "%s\n\n", m.vp.View())
+	fmt.Fprintf(&sb, "%s\n", stBorder.Render(m.msgInput.View()))
+	if m.isErr {
+		fmt.Fprintf(&sb, "%s\n", stErr.Render(m.notice))
 	} else if m.notice != "" {
-		if m.isOK {
-			b.WriteString(stOK.Render(m.notice))
-		} else {
-			b.WriteString(stErr.Render(m.notice))
-		}
-		b.WriteString("\n\n")
+		fmt.Fprintf(&sb, "%s\n", stOk.Render(m.notice))
 	}
+	fmt.Fprintf(&sb, "%s", stDim.Render("enter gönder   ctrl+f dosya gönder   esc geri"))
+	return sb.String()
+}
 
-	// ── Yardım satırı ──
-	if m.odak == odakBaslik {
-		b.WriteString(stMuted.Render("←/→ kategori    tab/enter içeriğe geç    ctrl+s gönder    ctrl+d taslak    esc çıkış"))
+func (m model) viewDosyaGonder() string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s\n\n", stTitle.Render(fmt.Sprintf("AND — Dosya Gönder  [→ %s…]", shortPeerID(m.peerID))))
+	fmt.Fprintf(&sb, "Göndermek istediğin dosyanın tam yolunu gir:\n\n")
+	fmt.Fprintf(&sb, "%s\n\n", stBorder.Render(m.fileInput.View()))
+	if m.isErr {
+		fmt.Fprintf(&sb, "%s\n", stErr.Render(m.notice))
+	} else if m.notice != "" {
+		fmt.Fprintf(&sb, "%s\n", stOk.Render(m.notice))
+	}
+	if m.sending {
+		fmt.Fprintf(&sb, "%s", stDim.Render("transfer devam ediyor — lütfen bekleyin…"))
 	} else {
-		b.WriteString(stMuted.Render("tab başlığa dön    enter alt satır    ctrl+s gönder    ctrl+d taslak    esc çıkış"))
+		fmt.Fprintf(&sb, "%s", stDim.Render("enter gönder   esc geri"))
 	}
-
-	box := stBox.Render(b.String())
-	if m.w > 0 && m.h > 0 {
-		return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, box)
-	}
-	return box
+	return sb.String()
 }
 
-func (m model) viewTaslak() string {
-	var b strings.Builder
-	b.WriteString(stHeader.Render("Taslaklar") + "\n\n")
-
-	for i, t := range m.taslaklar {
-		onizleme := kisalt(strings.TrimSpace(t.Icerik), 50)
-		katStr := stMuted.Render("[" + t.Kategori + "]")
-		if i == m.taslakIdx {
-			b.WriteString(stSel.Render("  ▶ "+kisalt(t.Baslik, 48)) + "  " + katStr + "\n")
-			b.WriteString(stSelMeta.Render("    "+onizleme) + "\n\n")
-		} else {
-			b.WriteString(stNorm.Render("    "+kisalt(t.Baslik, 48)) + "  " + katStr + "\n")
-			b.WriteString(stMuted.Render("    "+onizleme) + "\n\n")
-		}
+func shortPeerID(pid string) string {
+	if len(pid) > 16 {
+		return pid[:16]
 	}
-
-	b.WriteString(stMuted.Render("enter  düzenle    p  yayınla    x  sil    esc  geri"))
-
-	box := stBox.Render(b.String())
-	if m.w > 0 && m.h > 0 {
-		return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, box)
-	}
-	return box
+	return pid
 }
 
-// ─── Stiller ─────────────────────────────────────────────────────────────────
-
-var (
-	stHeader     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
-	stKat        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220"))
-	stMuted      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	stSel        = lipgloss.NewStyle().Background(lipgloss.Color("57")).Foreground(lipgloss.Color("255")).Bold(true)
-	stSelMeta    = lipgloss.NewStyle().Background(lipgloss.Color("57")).Foreground(lipgloss.Color("189"))
-	stNorm       = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	stOK         = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	stErr        = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	stWait       = lipgloss.NewStyle().Background(lipgloss.Color("241")).Foreground(lipgloss.Color("255"))
-	stLabel      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	stLabelAktif = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
-	stBox        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(1, 3)
-)
-
-// ─── Yardımcılar ─────────────────────────────────────────────────────────────
-
-func kisalt(s string, maks int) string {
-	r := []rune(s)
-	if len(r) <= maks {
-		return s
+func formatSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
 	}
-	return string(r[:maks-1]) + "…"
-}
-
-func charBar(suanki, maks int) string {
-	pct := float64(suanki) / float64(maks)
-	dolu := int(pct * 16)
-	if dolu > 16 {
-		dolu = 16
-	}
-	bar := strings.Repeat("█", dolu) + strings.Repeat("░", 16-dolu)
-	renk := lipgloss.Color("42")
-	if pct > 0.75 {
-		renk = lipgloss.Color("220")
-	}
-	if pct > 0.92 {
-		renk = lipgloss.Color("203")
-	}
-	return lipgloss.NewStyle().Foreground(renk).Render(fmt.Sprintf("%s %d/%d", bar, suanki, maks))
 }

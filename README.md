@@ -1,109 +1,138 @@
-# and-plugin-konu-ac — Konu Açma Eklentisi
+# and-plugin-ozel-chat — Özel Mesajlaşma
 
-Yeni forum konusu oluştur, taslak kaydet, kategoriler arasında gezin.
+Başka bir AND kullanıcısıyla doğrudan ve özel mesajlaş; dosya gönder.
 
 ---
 
 ## Genel Bakış
 
-`and-plugin-konu-ac` forum yazma işlemlerini yönetir. Ana forum görünümü salt okunurdur; tüm konu oluşturma bu eklenti üzerinden gerçekleşir.
+`and-plugin-ozel-chat` binary'si, libp2p stream protokolü (`/and/dm/1.0.0`) üzerinden iki peer arasında doğrudan mesajlaşma ve dosya aktarımı sağlar.
 
-Bu eklenti menüde **görünmez** (`Label` alanı boştur). Forumdan `n` tuşuna basıldığında AND tarafından **doğrudan ana süreç içinde** açılır — ayrı bir binary başlatılmaz, geçiş anında gerçekleşir.
+Mesajlar GossipSub üzerinden yayılmaz; yalnızca hedef peer'a iletilir.  
+AND, `/and/dm/1.0.0` akışını ve `/and/file/2.0.0` dosya protokolünü dinler; eklenti bu olayları long-poll HTTP ile alır.
 
 ---
 
 ## Kurulum
 
 ```bash
-go build -o and-plugin-konu-ac ./Eklentiler/konu_ac
+go build -o and-plugin-ozel-chat ./Eklentiler/ozel_chat
 
 # Windows
-go build -o and-plugin-konu-ac.exe ./Eklentiler/konu_ac
+go build -o and-plugin-ozel-chat.exe ./Eklentiler/ozel_chat
 ```
-
-Binary AND dizininde bulunmalıdır; AND başlangıçta manifest JSON dosyasını okur.
-
----
-
-## Nasıl Açılır
-
-Forumu açtıktan sonra `n` tuşuna bas.  
-AND seçili kategoriyi otomatik iletir; kategori seçim ekranı atlanır.
 
 ---
 
 ## Kullanım
 
-### Konu formu
+Ana menüden **Özel Chat**'i seç.
 
-Kategori satırında `◀` / `▶` tuşları ile kategori değiştirilebilir.
+### Adımlar
 
-| Tuş | İşlev |
-|-----|-------|
-| `tab` | Başlık ↔ İçerik arasında geç |
-| `enter` (Başlık) | İçerik alanına geç |
-| `enter` (İçerik) | Alt satıra geç |
-| `ctrl+s` | Konuyu gönder |
-| `ctrl+p` | Kalıcılık talebini aç/kapat (★ gösterilir) |
-| `ctrl+t` | Taslak listesini aç (taslak varsa) |
-| `◀` / `▶` | Kategori değiştir |
-| `esc` | İçeriği taslak olarak kaydet ve foruma dön |
-| `ctrl+c` | Kaydetmeden çık |
+1. **Peer ID girişi** — hedef kişinin libp2p Peer ID'sini gir (ör. `12D3KooWAbc…`)
+2. `enter` ile mesajlaşma ekranına geç
+3. Mesajını yaz, `enter` ile gönder
 
-### Taslak listesi
+Karşı tarafın Peer ID'si AND ana menüsünde kimlik bilgisi ekranında görünür.
+
+### Peer ID girişi ekranı
 
 | Tuş | İşlev |
 |-----|-------|
-| `↑` / `↓` ya da `j` / `k` | Taslak seç |
-| `enter` | Seçili taslağı forma yükle |
-| `d` | Seçili taslağı sil |
-| `esc` | Forma dön |
+| Yazma | Peer ID'yi gir |
+| `enter` | Bağlantıyı onayla, mesajlaşma ekranına geç |
+| `esc` ya da `q` | Ana menüye dön |
+
+### Mesajlaşma ekranı
+
+| Tuş | İşlev |
+|-----|-------|
+| Yazma | Mesajı yaz |
+| `enter` | Mesajı gönder |
+| `ctrl+f` | Dosya gönderme ekranına geç |
+| `esc` | Peer ID girişine dön |
+| `ctrl+c` | Çık |
+
+### Dosya gönderme ekranı
+
+| Tuş | İşlev |
+|-----|-------|
+| Yazma | Dosya yolunu gir |
+| `enter` | Dosyayı gönder |
+| `esc` | Mesajlaşma ekranına dön |
 
 ---
 
-## Taslak sistemi
+## Dosya Onay İsteği
 
-`esc` tuşuna basıldığında başlık veya içerik doluysa taslak otomatik kaydedilir.  
-Aynı kategori tekrar açıldığında taslaklar `ctrl+t` ile geri yüklenebilir.
+Başka bir kullanıcı sana dosya göndermek istediğinde ekranda onay isteği penceresi belirir:
 
-Taslaklar `AND_DATA_DIR/taslaklar_<kategori>.json` dosyalarında saklanır.  
-Bu dosyalar yereldir, ağa gönderilmez ve `.gitignore`'da yer alır.
+```
+╭─ Dosya Transfer İsteği ─────────────────╮
+│ Gönderen : 12D3Koo…xyz                  │
+│ Dosya    : rapor.pdf                    │
+│ Boyut    : 5.2 MB                       │
+│                                         │
+│ Bu kullanıcının dosya göndermesine      │
+│ izin veriyor musun?                     │
+│                                         │
+│ [y] Kabul   [n] Reddet                  │
+╰─────────────────────────────────────────╯
+```
 
----
+| Tuş | İşlev |
+|-----|-------|
+| `y` | Transferi kabul et |
+| `n` ya da `esc` | Transferi reddet |
 
-## Karakter Sınırları
-
-| Alan | Maksimum |
-|------|---------|
-| Başlık | 100 karakter |
-| İçerik | 2000 karakter |
-
----
-
-## Kategoriler
-
-| | | | |
-|--|--|--|--|
-| Python | C / C++ | Rust | Go |
-| JavaScript | Java / Kotlin | Yazılım | Web |
-| Mobil | Yapay Zeka | Veritabanı | DevOps |
-| Linux | Bilişim | Siber Güvenlik | Donanım |
-| Oyun Geliştirme | Açık Kaynak | Kariyer | Genel |
+30 saniye içinde yanıt verilmezse transfer otomatik olarak reddedilir.
 
 ---
 
-## Kalıcılık talebi
+## Teknik Detaylar
 
-`ctrl+p` ile aktif edilen kalıcılık talebi, moderatörden TTL muafiyeti isteğidir.  
-Form başlığında `★ Kalıcılık talep ediliyor` gösterilir.
+### Protokoller
 
-Bu yalnızca bir istek olarak iletilir; karar her zaman moderatördedir.
+| Protokol | Kullanım |
+|----------|----------|
+| `/and/dm/1.0.0` | Anlık metin mesajları (libp2p stream) |
+| `/and/file/2.0.0` | Yeniden başlatılabilir, parçalı dosya aktarımı |
+
+### Gelen mesajlar — long poll
+
+Eklenti her 5 saniyede `GET /api/v1/dm/poll` isteği gönderir.  
+AND mesaj gelene kadar bekler; gelince JSON array döner, yoksa 5 saniye sonra boş array döner.
+
+### Gelen dosyalar — long poll
+
+Eklenti paralel olarak `GET /api/v1/file/poll` isteği gönderir.  
+Dosya tamamen alındığında AND dosyayı diske yazar ve yolu eklentiye bildirir.
+
+### Onay akışı — long poll
+
+Eklenti paralel olarak `GET /api/v1/file/consent-poll` isteği gönderir.  
+Transfer isteği geldiğinde AND 30 saniye boyunca yanıt bekler; eklenti `POST /api/v1/file/consent` ile kabul/red bildirir.
+
+### Güvenlik sınırları
+
+- Gelen DM'ler 16 KB ile sınırlıdır; daha büyük paketler atılır
+- Her akış için 30 saniyelik okuma zaman aşımı uygulanır
+- Gönderme işlemi için 30 saniyelik zaman aşımı uygulanır
+
+### Veri saklama
+
+Mesaj geçmişi yalnızca oturum boyunca bellekte tutulur.  
+AND kapatıldığında veya eklenti çıktığında mesajlar silinir; kalıcı mesajlaşma yoktur.  
+Dosyalar AND kaydetme dizinine (`%APPDATA%\and\dosyalar\`) kalıcı olarak kaydedilir.
 
 ---
 
-## Moderasyon notu
+## Sınırlamalar
 
-Gönderilen konu hemen ağda yayılır, ancak varsayılan olarak moderasyon kuyruğuna girer ve 5 günlük TTL'e tabidir. Kurucu veya sertifikalı bir moderatör onaylayana kadar konu geçici olarak işaretlenir.
+- **Uçtan uca şifreleme yoktur.** Mesajlar libp2p Noise protokolü ile aktarım katmanında şifrelenir, ancak uygulama düzeyinde ek şifreleme uygulanmaz.
+- **Kalıcı iletim yoktur.** Alıcı çevrimdışıysa mesaj iletilmez ve kaybolur.
+- **Görünen ad doğrulanmaz.** `From` alanı gönderenin beyanıdır; gerçek kimlik için Peer ID'yi kullan.
 
 ---
 
@@ -111,21 +140,19 @@ Gönderilen konu hemen ağda yayılır, ancak varsayılan olarak moderasyon kuyr
 
 ```json
 {
-  "name":        "konu_ac",
-  "label":       "",
+  "name":        "ozel_chat",
+  "label":       "Özel Chat",
   "version":     "2.1.0",
-  "description": "Forum'da yeni konu oluşturma ve taslak yönetimi (menüde gizli, forumdan n ile açılır)",
+  "description": "Peer ID ile doğrudan özel mesajlaşma ve dosya aktarımı — libp2p stream",
   "author":      "AND"
 }
 ```
-
-`label` boş olduğu için bu eklenti ana menüde görünmez.
 
 ---
 
 ## Kaynak
 
-Kaynak kod: [Eklentiler/konu_ac/main.go](main.go)
+Kaynak kod: [Eklentiler/ozel_chat/main.go](main.go)
 
 ---
 
@@ -133,6 +160,6 @@ Kaynak kod: [Eklentiler/konu_ac/main.go](main.go)
 
 | Sürüm | Değişiklik |
 |-------|------------|
-| 2.1.0 | AND ana sürecinde inline çalışma (ayrı binary başlatılmaz); Tab ile alan geçişi; kategori ◀/▶; Enter ile İçerik'te alt satır |
-| 2.0.0 | Bağımsız binary; HTTP IPC ile AND ile iletişim; taslak sistemi |
-| 1.0.0 | İlk sürüm |
+| 2.1.0 | Dosya gönderme (`ctrl+f`); dosya onay isteği dialog; consent-poll / consent API |
+| 2.0.0 | Bağımsız binary; long-poll HTTP IPC; dmmgr üzerinden akış proxy'si |
+| 1.0.0 | İlk sürüm (gömülü plugin sistemi) |
