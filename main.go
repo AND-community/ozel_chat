@@ -13,7 +13,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/lucian95511/and/internal/pluginapi"
+	"github.com/lucian95511/and/internal/pluginui"
 )
+
+// ─── Terminal güvenliği ───────────────────────────────────────────────────────
+//
+// Uzak bir eşten gelen her string (DM metni, gönderen adı, dosya adı/yolu)
+// güvenilmezdir; terminale yazmadan önce ANSI kaçış dizileri temizlenir —
+// bkz. internal/pluginui.Safe.
+func safe(s string) string { return pluginui.Safe(s) }
 
 var manifest = pluginapi.Manifest{
 	Name:        "ozel_chat",
@@ -51,14 +59,14 @@ func main() {
 }
 
 var (
-	stTitle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
-	stSelf     = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	stOther    = lipgloss.NewStyle()
-	stOk       = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	stErr      = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	stDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	stFile     = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	stBorder   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	stTitle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	stSelf   = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	stOther  = lipgloss.NewStyle()
+	stOk     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	stErr    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	stDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	stFile   = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	stBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 )
 
 type dmPollResult struct {
@@ -86,19 +94,19 @@ const (
 )
 
 type model struct {
-	client      *pluginapi.Client
-	identity    pluginapi.IdentityInfo
-	ekran       ekran
-	peerInput   textinput.Model
-	msgInput    textinput.Model
-	fileInput   textinput.Model
-	peerID      string
-	vp          viewport.Model
-	lines       []string
-	notice      string
-	isErr       bool
-	sending     bool
-	w, h        int
+	client         *pluginapi.Client
+	identity       pluginapi.IdentityInfo
+	ekran          ekran
+	peerInput      textinput.Model
+	msgInput       textinput.Model
+	fileInput      textinput.Model
+	peerID         string
+	vp             viewport.Model
+	lines          []string
+	notice         string
+	isErr          bool
+	sending        bool
+	w, h           int
 	pendingConsent *pluginapi.FileConsentReq // bekleyen onay isteği
 }
 
@@ -196,7 +204,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		for _, dm := range msg.msgs {
 			ts := dm.ReceivedAt.Local().Format("15:04")
-			line := stOther.Render(fmt.Sprintf("[%s] %s: %s", ts, dm.From, dm.Text))
+			line := stOther.Render(fmt.Sprintf("[%s] %s: %s", ts, safe(dm.From), safe(dm.Text)))
 			m.lines = append(m.lines, line)
 		}
 		if len(msg.msgs) > 0 {
@@ -219,7 +227,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		for _, fm := range msg.msgs {
 			ts := fm.ReceivedAt.Local().Format("15:04")
-			label := fmt.Sprintf("[%s] dosya %s → %s (%s) kaydedildi: %s", ts, fm.From, fm.Filename, formatSize(fm.Size), fm.SavePath)
+			label := fmt.Sprintf("[%s] dosya %s → %s (%s) kaydedildi: %s", ts, safe(fm.From), safe(fm.Filename), formatSize(fm.Size), safe(fm.SavePath))
 			m.lines = append(m.lines, stFile.Render(label))
 		}
 		if len(msg.msgs) > 0 {
@@ -401,7 +409,6 @@ func (m *model) syncVP() {
 	m.vp.GotoBottom()
 }
 
-
 func (m model) View() string {
 	switch m.ekran {
 	case ekPeerGirisi:
@@ -421,7 +428,7 @@ func (m model) viewOnay() string {
 		return ""
 	}
 	c := m.pendingConsent
-	senderShort := c.SenderID
+	senderShort := safe(c.SenderID)
 	if r := []rune(senderShort); len(r) > 20 {
 		senderShort = string(r[:8]) + "…" + string(r[len(r)-8:])
 	}
@@ -432,7 +439,7 @@ func (m model) viewOnay() string {
 	var sb strings.Builder
 	sb.WriteString(stWarn.Render("Dosya Transfer İsteği") + "\n\n")
 	sb.WriteString(fmt.Sprintf("Gönderen : %s\n", stDim.Render(senderShort)))
-	sb.WriteString(fmt.Sprintf("Dosya    : %s\n", stFile.Render(c.Filename)))
+	sb.WriteString(fmt.Sprintf("Dosya    : %s\n", stFile.Render(safe(c.Filename))))
 	sb.WriteString(fmt.Sprintf("Boyut    : %s\n\n", stDim.Render(formatSize(c.Size))))
 	sb.WriteString("Bu kullanıcının dosya göndermesine izin veriyor musun?\n\n")
 	sb.WriteString(stOk.Render("[y] Kabul") + "   " + stErr.Render("[n] Reddet"))
